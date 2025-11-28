@@ -129,6 +129,30 @@ MIN_CHILDREN = 0
 MAX_CHILDREN = 5
 
 
+def _build_alamat_from_record(record: dict) -> str:
+    """Build street address from RT/RW record with jalan_list and lorong_list"""
+    parts = []
+    
+    # Pick one random jalan if available
+    jalan_list = record.get('jalan_list', [])
+    if jalan_list:
+        jalan = random.choice(jalan_list).strip()
+        if jalan:
+            parts.append(jalan)
+    
+    # Pick one random lorong if available
+    lorong_list = record.get('lorong_list', [])
+    if lorong_list:
+        lorong = random.choice(lorong_list).strip()
+        if lorong:
+            # Add "Lorong" prefix if not already present
+            if not lorong.upper().startswith('LORONG') and not lorong.upper().startswith('LR'):
+                lorong = f"Lorong {lorong}"
+            parts.append(lorong)
+    
+    return ', '.join(parts) if parts else ''
+
+
 def _generate_birth_date(age: int) -> date:
     """Generate a random birth date for given age"""
     today = date.today()
@@ -164,7 +188,9 @@ def _create_person(
     tempat_lahir_pools: Dict[str, List[str]],
     all_tempat_lahir: List[str],
     nama_ayah: str = None,
-    nama_ibu: str = None
+    nama_ibu: str = None,
+    latitude: float = None,
+    longitude: float = None
 ) -> dict:
     """Create a single person record (pure function for multiprocessing)"""
     today = date.today()
@@ -217,7 +243,9 @@ def _create_person(
         'KODE_KABUPATEN': village_info['regency_code'],
         'KABUPATEN': village_info['regency_name'],
         'KODE_PROVINSI': village_info['province_code'],
-        'PROVINSI': village_info['province_name']
+        'PROVINSI': village_info['province_name'],
+        'LATITUDE': latitude,
+        'LONGITUDE': longitude
     }
 
 
@@ -228,7 +256,8 @@ def _generate_single_family(
     reg_code: str,
     dist_code: str,
     tempat_lahir_pools: Dict[str, List[str]],
-    all_tempat_lahir: List[str]
+    all_tempat_lahir: List[str],
+    rt_rw_lookup: Dict[str, List[dict]] = None
 ) -> List[dict]:
     """Generate a single family (pure function for multiprocessing)"""
     family_members = []
@@ -236,9 +265,32 @@ def _generate_single_family(
     # Generate shared family data
     nkk = id_gen.generate_nkk(prov_code, reg_code, dist_code)
     family_agama = get_random_agama(weighted=True)
-    alamat = get_random_alamat()
-    rt = get_random_rt()
-    rw = get_random_rw()
+    
+    # Try to get RT/RW data from lookup
+    village_code = village_info['village_code']
+    rt_rw_data = None
+    if rt_rw_lookup and village_code in rt_rw_lookup:
+        records = rt_rw_lookup[village_code]
+        if records:
+            rt_rw_data = random.choice(records)
+    
+    if rt_rw_data:
+        # Use actual RT/RW data
+        rt = rt_rw_data['rt']
+        rw = rt_rw_data['rw']
+        # Build alamat from jalan_list and lorong_list
+        alamat = _build_alamat_from_record(rt_rw_data)
+        if not alamat:
+            alamat = get_random_alamat()
+        latitude = rt_rw_data['latitude']
+        longitude = rt_rw_data['longitude']
+    else:
+        # Fallback to random values
+        alamat = get_random_alamat()
+        rt = get_random_rt()
+        rw = get_random_rw()
+        latitude = None
+        longitude = None
     
     # Generate head of family
     head_age = random.randint(MIN_HEAD_AGE, MAX_HEAD_AGE)
@@ -261,7 +313,9 @@ def _generate_single_family(
         rt=rt,
         rw=rw,
         tempat_lahir_pools=tempat_lahir_pools,
-        all_tempat_lahir=all_tempat_lahir
+        all_tempat_lahir=all_tempat_lahir,
+        latitude=latitude,
+        longitude=longitude
     )
     family_members.append(head)
     
@@ -287,7 +341,9 @@ def _generate_single_family(
             rt=rt,
             rw=rw,
             tempat_lahir_pools=tempat_lahir_pools,
-            all_tempat_lahir=all_tempat_lahir
+            all_tempat_lahir=all_tempat_lahir,
+            latitude=latitude,
+            longitude=longitude
         )
         family_members.append(wife)
         
@@ -337,7 +393,9 @@ def _generate_single_family(
                 tempat_lahir_pools=tempat_lahir_pools,
                 all_tempat_lahir=all_tempat_lahir,
                 nama_ayah=head['NAMA'],
-                nama_ibu=wife['NAMA']
+                nama_ibu=wife['NAMA'],
+                latitude=latitude,
+                longitude=longitude
             )
             family_members.append(child)
     
@@ -349,7 +407,7 @@ def _worker_generate_batch(args: Tuple) -> Tuple[List[dict], dict]:
     Worker function to generate a batch of families.
     Returns (list of people, batch statistics)
     """
-    worker_id, total_workers, batch_items, village_lookup, nik_codes_lookup, tempat_lahir_pools, all_tempat_lahir = args
+    worker_id, total_workers, batch_items, village_lookup, nik_codes_lookup, tempat_lahir_pools, all_tempat_lahir, rt_rw_lookup = args
     
     # Create worker-local ID generator
     id_gen = ProcessLocalIDGenerator(worker_id, total_workers)
@@ -371,7 +429,7 @@ def _worker_generate_batch(args: Tuple) -> Tuple[List[dict], dict]:
         for _ in range(family_count):
             family = _generate_single_family(
                 village_info, id_gen, prov_code, reg_code, dist_code,
-                tempat_lahir_pools, all_tempat_lahir
+                tempat_lahir_pools, all_tempat_lahir, rt_rw_lookup
             )
             all_people.extend(family)
             
@@ -402,7 +460,7 @@ def _worker_generate_batch_streaming(args: Tuple) -> Tuple[int, dict]:
     Worker function that writes directly to temp files (streaming).
     Returns (families_generated, batch_statistics)
     """
-    worker_id, total_workers, batch_items, village_lookup, nik_codes_lookup, temp_dir, fieldnames, tempat_lahir_pools, all_tempat_lahir = args
+    worker_id, total_workers, batch_items, village_lookup, nik_codes_lookup, temp_dir, fieldnames, tempat_lahir_pools, all_tempat_lahir, rt_rw_lookup = args
     
     id_gen = ProcessLocalIDGenerator(worker_id, total_workers)
     temp_file = os.path.join(temp_dir, f"worker_{worker_id}.csv")
@@ -426,7 +484,7 @@ def _worker_generate_batch_streaming(args: Tuple) -> Tuple[int, dict]:
             for _ in range(family_count):
                 family = _generate_single_family(
                     village_info, id_gen, prov_code, reg_code, dist_code,
-                    tempat_lahir_pools, all_tempat_lahir
+                    tempat_lahir_pools, all_tempat_lahir, rt_rw_lookup
                 )
                 
                 # Write immediately to disk
@@ -463,7 +521,7 @@ class ParallelFamilyGenerator:
         'AGAMA', 'PENDIDIKAN', 'PEKERJAAN', 'STATUS_PERKAWINAN', 'STATUS_HUBUNGAN',
         'GOLONGAN_DARAH', 'KEWARGANEGARAAN', 'NAMA_AYAH', 'NAMA_IBU', 'ALAMAT',
         'RT', 'RW', 'KODE_KELURAHAN', 'KELURAHAN', 'KODE_KECAMATAN', 'KECAMATAN',
-        'KODE_KABUPATEN', 'KABUPATEN', 'KODE_PROVINSI', 'PROVINSI'
+        'KODE_KABUPATEN', 'KABUPATEN', 'KODE_PROVINSI', 'PROVINSI', 'LATITUDE', 'LONGITUDE'
     ]
     
     def __init__(self, wilayah_loader: WilayahLoader = None, num_workers: int = None):
@@ -616,7 +674,7 @@ class ParallelFamilyGenerator:
         # Build worker arguments
         worker_args = [
             (i, self.num_workers, batches[i], village_lookup, nik_codes_lookup,
-             self.tempat_lahir_pools, self.all_tempat_lahir)
+             self.tempat_lahir_pools, self.all_tempat_lahir, self.wilayah.rt_rw_data)
             for i in range(self.num_workers)
             if batches[i]  # Skip empty batches
         ]
@@ -696,7 +754,8 @@ class ParallelFamilyGenerator:
             # Build worker arguments
             worker_args = [
                 (i, self.num_workers, batches[i], village_lookup, nik_codes_lookup, 
-                 temp_dir, self.FIELDNAMES, self.tempat_lahir_pools, self.all_tempat_lahir)
+                 temp_dir, self.FIELDNAMES, self.tempat_lahir_pools, self.all_tempat_lahir,
+                 self.wilayah.rt_rw_data)
                 for i in range(self.num_workers)
                 if batches[i]
             ]

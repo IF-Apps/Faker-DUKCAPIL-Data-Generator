@@ -202,9 +202,24 @@ class FamilyGenerator:
         # Generate shared family data
         nkk = self.id_gen.generate_nkk(prov_code, reg_code, dist_code)
         family_agama = get_random_agama(weighted=True)
-        alamat = get_random_alamat()
-        rt = get_random_rt()
-        rw = get_random_rw()
+        
+        # Try to get RT/RW data from koordinat_rt_rw.csv
+        rt_rw_data = self.wilayah.get_rt_rw_data(village_info['village_code'])
+        
+        if rt_rw_data:
+            # Use actual RT/RW data
+            rt = rt_rw_data['rt']
+            rw = rt_rw_data['rw']
+            alamat = rt_rw_data['alamat'] if rt_rw_data['alamat'] else get_random_alamat()
+            latitude = rt_rw_data['latitude']
+            longitude = rt_rw_data['longitude']
+        else:
+            # Fallback to random values
+            alamat = get_random_alamat()
+            rt = get_random_rt()
+            rw = get_random_rw()
+            latitude = None
+            longitude = None
         
         # Generate head of family (Kepala Keluarga) - always male
         head_age = random.randint(self.MIN_HEAD_AGE, self.MAX_HEAD_AGE)
@@ -227,7 +242,9 @@ class FamilyGenerator:
             rw=rw,
             prov_code=prov_code,
             reg_code=reg_code,
-            dist_code=dist_code
+            dist_code=dist_code,
+            latitude=latitude,
+            longitude=longitude
         )
         family_members.append(head)
         
@@ -251,7 +268,9 @@ class FamilyGenerator:
                 rw=rw,
                 prov_code=prov_code,
                 reg_code=reg_code,
-                dist_code=dist_code
+                dist_code=dist_code,
+                latitude=latitude,
+                longitude=longitude
             )
             family_members.append(wife)
             
@@ -307,7 +326,9 @@ class FamilyGenerator:
                     reg_code=reg_code,
                     dist_code=dist_code,
                     nama_ayah=head['NAMA'],
-                    nama_ibu=wife['NAMA']
+                    nama_ibu=wife['NAMA'],
+                    latitude=latitude,
+                    longitude=longitude
                 )
                 family_members.append(child)
         
@@ -329,7 +350,9 @@ class FamilyGenerator:
         reg_code: str,
         dist_code: str,
         nama_ayah: str = None,
-        nama_ibu: str = None
+        nama_ibu: str = None,
+        latitude: float = None,
+        longitude: float = None
     ) -> dict:
         """Create a single person record"""
         
@@ -397,7 +420,9 @@ class FamilyGenerator:
             'KODE_KABUPATEN': village_info['regency_code'],
             'KABUPATEN': village_info['regency_name'],
             'KODE_PROVINSI': village_info['province_code'],
-            'PROVINSI': village_info['province_name']
+            'PROVINSI': village_info['province_name'],
+            'LATITUDE': latitude,
+            'LONGITUDE': longitude
         }
         
         # Update statistics

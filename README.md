@@ -25,6 +25,14 @@ Aplikasi Python untuk generate data penduduk Indonesia secara realistis dengan f
 - 83.761 Kelurahan
 - Berdasarkan data Kemendagri terbaru
 
+### 📍 Integrasi Data RT/RW & Koordinat GPS
+Untuk kelurahan yang memiliki data RT/RW (via `data/koordinat_rt_rw.csv`):
+- RT dan RW aktual per kelurahan
+- Nama jalan dan lorong yang sebenarnya
+- Koordinat GPS (latitude/longitude) per RT
+- Alamat otomatis dibangun dari data jalan/lorong
+- Jika ada multiple jalan (dipisah `&`), dipilih salah satu secara random per keluarga
+
 ### ⚡ Parallel Processing
 - Mode Sequential (single thread) untuk data kecil
 - Mode Parallel (multi-core) untuk jutaan record
@@ -152,6 +160,8 @@ python src/main.py
 Loading data wilayah...
 ✓ Data loaded: 37 provinsi, 514 kab/kota
   7277 kecamatan, 83761 kelurahan
+✓ RT/RW data: 5,108 records, 245 kelurahan
+  4,892 records dengan koordinat
 
 Masukkan kode wilayah: 7371
 ✓ KOTA MAKASSAR (15 kecamatan, 153 kelurahan)
@@ -277,12 +287,20 @@ NIK 16 digit dengan format: `[PP][KK][CC][DDMMYY][SSSS]`
 | 14 | NAMA_AYAH | String | Nama ayah kandung |
 | 15 | NAMA_IBU | String | Nama ibu kandung |
 | 16 | ALAMAT | String | Alamat lengkap dengan nama jalan |
-| 17 | RT | String(3) | Nomor RT (001-020) |
-| 18 | RW | String(3) | Nomor RW (001-015) |
-| 19 | KELURAHAN | String | Nama kelurahan/desa |
-| 20 | KECAMATAN | String | Nama kecamatan |
-| 21 | KABUPATEN | String | Nama kabupaten/kota |
-| 22 | PROVINSI | String | Nama provinsi |
+| 17 | RT | String(3) | Nomor RT (001-020 atau aktual dari data) |
+| 18 | RW | String(3) | Nomor RW (001-015 atau aktual dari data) |
+| 19 | KODE_KELURAHAN | String(10) | Kode kelurahan Kemendagri |
+| 20 | KELURAHAN | String | Nama kelurahan/desa |
+| 21 | KODE_KECAMATAN | String(6) | Kode kecamatan Kemendagri |
+| 22 | KECAMATAN | String | Nama kecamatan |
+| 23 | KODE_KABUPATEN | String(4) | Kode kabupaten/kota Kemendagri |
+| 24 | KABUPATEN | String | Nama kabupaten/kota |
+| 25 | KODE_PROVINSI | String(2) | Kode provinsi Kemendagri |
+| 26 | PROVINSI | String | Nama provinsi |
+| 27 | LATITUDE | Decimal(10,7) | Koordinat latitude GPS (nullable) |
+| 28 | LONGITUDE | Decimal(10,7) | Koordinat longitude GPS (nullable) |
+
+> **Catatan:** Field LATITUDE dan LONGITUDE berisi `NULL` jika kelurahan tidak memiliki data RT/RW di `koordinat_rt_rw.csv` atau jika koordinat tidak tersedia dalam data.
 
 ## 🏗️ Struktur Keluarga
 
@@ -338,11 +356,12 @@ generate-people/
 │   ├── provinces.csv      # 37 provinsi
 │   ├── regencies.csv      # 514 kab/kota
 │   ├── districts.csv      # 7,277 kecamatan
-│   └── villages.csv       # 83,761 kelurahan
+│   ├── villages.csv       # 83,761 kelurahan
+│   └── koordinat_rt_rw.csv # 5,108 RT/RW dengan koordinat GPS (opsional)
 ├── src/
 │   ├── __init__.py
 │   ├── main.py            # CLI entry point
-│   ├── wilayah_loader.py  # Load & validasi wilayah
+│   ├── wilayah_loader.py  # Load & validasi wilayah + RT/RW
 │   ├── reference_data.py  # Data referensi Indonesia
 │   ├── id_generator.py    # NIK & NKK generator
 │   ├── family_generator.py # Generate keluarga (sequential)
@@ -402,6 +421,46 @@ gen.generate_families_streaming(
 | 10,000 | Parallel (8 core) | ~5s | 8,000 |
 | 100,000 | Parallel (8 core) | ~45s | 9,000 |
 | 1,000,000 | Streaming (8 core) | ~7min | 10,000 |
+
+## 📍 Data RT/RW & Koordinat GPS
+
+Aplikasi mendukung integrasi data RT/RW aktual dengan koordinat GPS melalui file `data/koordinat_rt_rw.csv`.
+
+### Format File koordinat_rt_rw.csv
+
+```csv
+kode,kelurahan_kode,rw,rt,meliputi_jalan,meliputi_lorong,rt_latitude,rt_longitude
+7371011001001001,7371011001,001,001,JL.DAHLIA,LORONG 312,-5.162425,119.403620
+7371011002001001,7371011002,001,001,JL.ANGGREK & JL.MELATI,LORONG 5,-5.163000,119.405000
+```
+
+| Kolom | Deskripsi |
+|-------|-----------|
+| `kode` | Kode unik RT (gabungan kelurahan+rw+rt) |
+| `kelurahan_kode` | Kode kelurahan 10 digit |
+| `rw` | Nomor RW (3 digit) |
+| `rt` | Nomor RT (3 digit) |
+| `meliputi_jalan` | Nama jalan (gunakan `&` untuk multiple jalan) |
+| `meliputi_lorong` | Nama lorong/gang (gunakan `&` untuk multiple lorong) |
+| `rt_latitude` | Koordinat latitude (atau "." jika tidak ada) |
+| `rt_longitude` | Koordinat longitude (atau "." jika tidak ada) |
+
+> **Catatan:** Jika kolom `meliputi_jalan` atau `meliputi_lorong` mengandung beberapa nilai yang dipisahkan dengan `&` (contoh: `JL.ANGGREK & JL.MELATI`), generator akan memilih salah satu secara random untuk setiap keluarga.
+
+### Perilaku Generator
+
+1. **Kelurahan dengan data RT/RW**: Menggunakan RT, RW, dan alamat aktual dari file
+2. **Kelurahan tanpa data RT/RW**: Generate RT/RW random (001-020, 001-015) dan alamat random
+3. **Multiple jalan/lorong**: Jika data mengandung `&`, dipilih salah satu secara random
+4. **Koordinat**: Hanya diisi jika tersedia dalam data, kosong jika tidak
+
+### Menambah Data RT/RW
+
+Untuk menambah coverage RT/RW:
+1. Buat atau edit file `data/koordinat_rt_rw.csv`
+2. Pastikan format sesuai dengan struktur di atas
+3. Gunakan "." untuk koordinat yang tidak tersedia
+4. Restart aplikasi untuk memuat data baru
 
 ## ⚠️ Disclaimer
 

@@ -54,6 +54,8 @@ class SQLExporter:
         ('KABUPATEN', 'VARCHAR', 100),
         ('KODE_PROVINSI', 'VARCHAR', 5),
         ('PROVINSI', 'VARCHAR', 100),
+        ('LATITUDE', 'DECIMAL', (10, 7)),
+        ('LONGITUDE', 'DECIMAL', (10, 7)),
     ]
     
     def __init__(self, db_type: str):
@@ -158,24 +160,35 @@ END;
 {columns_str}
 );"""
     
-    def _get_column_definition(self, name: str, col_type: str, size: int) -> str:
+    def _get_column_definition(self, name: str, col_type: str, size) -> str:
         """Get column definition for specific database"""
         if self.db_type == self.ORACLE:
             if col_type == 'VARCHAR':
                 return f"{name} VARCHAR2({size})"
+            elif col_type == 'DECIMAL':
+                precision, scale = size
+                return f"{name} NUMBER({precision},{scale})"
             return f"{name} {col_type}"
         
         elif self.db_type == self.SQLSERVER:
             if col_type == 'VARCHAR':
                 return f"[{name}] NVARCHAR({size})"
+            elif col_type == 'DECIMAL':
+                precision, scale = size
+                return f"[{name}] DECIMAL({precision},{scale})"
             return f"[{name}] {col_type}"
         
         elif self.db_type == self.SQLITE:
+            if col_type == 'DECIMAL':
+                return f"{name} REAL"
             return f"{name} TEXT"
         
         else:  # PostgreSQL, MySQL, MariaDB
             if col_type == 'VARCHAR':
                 return f"{name} VARCHAR({size})"
+            elif col_type == 'DECIMAL':
+                precision, scale = size
+                return f"{name} DECIMAL({precision},{scale})"
             return f"{name} {col_type}"
     
     def _get_primary_key(self) -> str:
@@ -260,6 +273,12 @@ END;
             value = record.get(col, '')
             if value is None:
                 values.append('NULL')
+            elif col in ['LATITUDE', 'LONGITUDE']:
+                # Numeric values without quotes
+                if value == '' or value is None:
+                    values.append('NULL')
+                else:
+                    values.append(str(value))
             else:
                 # Escape single quotes
                 escaped = str(value).replace("'", "''")

@@ -312,6 +312,13 @@ def main():
         loader = get_loader()
         print(f"✓ Data loaded: {len(loader.provinces)} provinsi, {len(loader.regencies)} kab/kota")
         print(f"  {len(loader.districts)} kecamatan, {len(loader.villages)} kelurahan")
+        
+        # Show RT/RW coverage
+        rt_rw_coverage = loader.get_rt_rw_coverage()
+        if rt_rw_coverage['total_records'] > 0:
+            print(f"✓ RT/RW data: {rt_rw_coverage['total_records']:,} records, "
+                  f"{rt_rw_coverage['kelurahan_with_data']:,} kelurahan")
+            print(f"  {rt_rw_coverage['records_with_coordinates']:,} records dengan koordinat")
     except Exception as e:
         print(f"❌ Error loading data: {e}")
         sys.exit(1)

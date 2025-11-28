@@ -5,6 +5,7 @@ Load and manage Indonesian regional data from CSV files
 
 import os
 import csv
+import random
 from typing import Dict, List, Optional, Tuple
 
 
@@ -28,6 +29,7 @@ class WilayahLoader:
         self.regencies: Dict[str, dict] = {}
         self.districts: Dict[str, dict] = {}
         self.villages: Dict[str, dict] = {}
+        self.rt_rw_data: Dict[str, List[dict]] = {}  # kelurahan_kode -> list of RT/RW records
         
         self._load_data()
     
@@ -37,6 +39,7 @@ class WilayahLoader:
         self._load_regencies()
         self._load_districts()
         self._load_villages()
+        self._load_rt_rw()
     
     def _load_provinces(self):
         """Load provinces from CSV"""
@@ -89,6 +92,148 @@ class WilayahLoader:
                     'name': name,
                     'district_id': district_id
                 }
+    
+    def _load_rt_rw(self):
+        """Load RT/RW coordinate data from CSV if available"""
+        filepath = os.path.join(self.data_dir, 'koordinat_rt_rw.csv')
+        if not os.path.exists(filepath):
+            return
+        
+        with open(filepath, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                kelurahan_kode = row.get('kelurahan_kode', '').strip()
+                if not kelurahan_kode:
+                    continue
+                
+                # Parse coordinates - skip invalid ones ("." or empty)
+                lat_str = row.get('rt_latitude', '').strip()
+                lon_str = row.get('rt_longitude', '').strip()
+                
+                latitude = None
+                longitude = None
+                
+                if lat_str and lat_str != '.' and lon_str and lon_str != '.':
+                    try:
+                        latitude = float(lat_str)
+                        longitude = float(lon_str)
+                    except ValueError:
+                        pass  # Keep as None if invalid
+                
+                # Parse jalan and lorong
+                jalan = row.get('meliputi_jalan', '').strip()
+                lorong = row.get('meliputi_lorong', '').strip()
+                
+                # Parse jalan/lorong into lists (split by &)
+                jalan_list = self._parse_multi_value(jalan)
+                lorong_list = self._parse_multi_value(lorong)
+                
+                rt_rw_record = {
+                    'kode': row.get('kode', '').strip(),
+                    'kelurahan_kode': kelurahan_kode,
+                    'rw': row.get('rw', '').strip().zfill(3),
+                    'rt': row.get('rt', '').strip().zfill(3),
+                    'jalan_list': jalan_list,
+                    'lorong_list': lorong_list,
+                    'latitude': latitude,
+                    'longitude': longitude
+                }
+                
+                if kelurahan_kode not in self.rt_rw_data:
+                    self.rt_rw_data[kelurahan_kode] = []
+                self.rt_rw_data[kelurahan_kode].append(rt_rw_record)
+    
+    def _parse_multi_value(self, value: str) -> list:
+        """Parse value that may contain multiple items separated by &"""
+        if not value:
+            return []
+        
+        # Split by & and clean each part
+        parts = [p.strip() for p in value.split('&')]
+        # Filter out empty strings
+        return [p for p in parts if p]
+    
+    def _build_alamat(self, jalan: str, lorong: str) -> str:
+        """Build street address from jalan and lorong"""
+        parts = []
+        
+        if jalan:
+            # Clean up jalan name
+            jalan_clean = jalan.strip()
+            if jalan_clean:
+                parts.append(jalan_clean)
+        
+        if lorong:
+            # Clean up lorong
+            lorong_clean = lorong.strip()
+            if lorong_clean:
+                # Add "Lorong" prefix if not already present
+                if not lorong_clean.upper().startswith('LORONG') and not lorong_clean.upper().startswith('LR'):
+                    lorong_clean = f"Lorong {lorong_clean}"
+                parts.append(lorong_clean)
+        
+        if parts:
+            return ', '.join(parts)
+        return ''
+    
+    def get_rt_rw_data(self, kelurahan_kode: str) -> Optional[dict]:
+        """
+        Get random RT/RW data for a kelurahan
+        
+        Args:
+            kelurahan_kode: 10-digit kelurahan code
+            
+        Returns:
+            Dict with rt, rw, alamat, latitude, longitude or None if not available
+        """
+        records = self.rt_rw_data.get(kelurahan_kode, [])
+        if not records:
+            return None
+        
+        record = random.choice(records)
+        
+        # Pick one random jalan and lorong (if multiple exist)
+        jalan = random.choice(record['jalan_list']) if record['jalan_list'] else ''
+        lorong = random.choice(record['lorong_list']) if record['lorong_list'] else ''
+        
+        # Build alamat dynamically
+        alamat = self._build_alamat(jalan, lorong)
+        
+        return {
+            'rt': record['rt'],
+            'rw': record['rw'],
+            'alamat': alamat,
+            'latitude': record['latitude'],
+            'longitude': record['longitude']
+        }
+    
+    def get_rt_rw_coverage(self) -> dict:
+        """
+        Get RT/RW data coverage statistics
+        
+        Returns:
+            Dict with coverage statistics
+        """
+        total_records = sum(len(records) for records in self.rt_rw_data.values())
+        kelurahan_count = len(self.rt_rw_data)
+        
+        # Count records with valid coordinates
+        records_with_coords = 0
+        for records in self.rt_rw_data.values():
+            for record in records:
+                if record['latitude'] is not None and record['longitude'] is not None:
+                    records_with_coords += 1
+        
+        return {
+            'total_records': total_records,
+            'kelurahan_with_data': kelurahan_count,
+            'records_with_coordinates': records_with_coords,
+            'total_kelurahan': len(self.villages)
+        }
+    
+    def has_rt_rw_data(self, kelurahan_kode: str) -> bool:
+        """Check if kelurahan has RT/RW data available"""
+        return kelurahan_kode in self.rt_rw_data
     
     def validate_code(self, code: str) -> Tuple[bool, Optional[dict]]:
         """
