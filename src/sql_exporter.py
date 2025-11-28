@@ -22,6 +22,7 @@ class SQLExporter:
     STRUCTURE_ONLY = 1
     DATA_ONLY = 2
     STRUCTURE_AND_DATA = 3
+    ALL_MODES = 4
     
     # Table name
     TABLE_NAME = 'penduduk'

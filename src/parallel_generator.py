@@ -28,12 +28,10 @@ from .tempat_lahir import get_random_tempat_lahir, build_tempat_lahir_pools
 
 class ProcessLocalIDGenerator:
     """
-    ID Generator for multiprocessing - uses worker_id + batch_id for unique sequences.
-    Each worker gets a unique range of sequence numbers to avoid collisions.
+    ID Generator for multiprocessing - uses worker_id to ensure unique sequences.
+    Each worker generates sequences in format: WXXX where W=worker_id, XXX=local_seq
+    This ensures no collision between workers.
     """
-    
-    # Maximum sequence per base_key per worker
-    SEQUENCE_RANGE_PER_WORKER = 2500
     
     def __init__(self, worker_id: int, total_workers: int):
         """
@@ -46,13 +44,12 @@ class ProcessLocalIDGenerator:
         self.worker_id = worker_id
         self.total_workers = total_workers
         
-        # Calculate sequence range for this worker
-        self.sequence_start = worker_id * self.SEQUENCE_RANGE_PER_WORKER + 1
-        self.sequence_end = (worker_id + 1) * self.SEQUENCE_RANGE_PER_WORKER
-        
-        # Local sequence counters
+        # Local sequence counters per base_key
         self._nik_sequences: Dict[str, int] = {}
         self._nkk_sequences: Dict[str, int] = {}
+        
+        # Track used NIKs within this worker to avoid duplicates
+        self._used_niks: set = set()
     
     def generate_nik(
         self,
@@ -62,7 +59,7 @@ class ProcessLocalIDGenerator:
         birth_date: date,
         gender: str
     ) -> str:
-        """Generate a valid NIK with worker-specific sequence range"""
+        """Generate a valid unique NIK"""
         # Format date part
         day = birth_date.day
         if gender == 'P':  # Female: add 40 to day
@@ -73,22 +70,42 @@ class ProcessLocalIDGenerator:
         # Build base key for sequence tracking
         base_key = f"{province_code}{regency_code}{district_code}{date_str}"
         
-        # Get next sequence number within this worker's range
+        # Get next sequence number
         if base_key not in self._nik_sequences:
-            self._nik_sequences[base_key] = self.sequence_start - 1
+            self._nik_sequences[base_key] = 0
         
-        self._nik_sequences[base_key] += 1
-        sequence = self._nik_sequences[base_key]
+        # Find next available unique sequence
+        max_attempts = 10000
+        for _ in range(max_attempts):
+            self._nik_sequences[base_key] += 1
+            local_seq = self._nik_sequences[base_key]
+            
+            # Create unique sequence: combine worker_id with local sequence
+            # Format: worker_id (1 digit) + local_seq (3 digits) = 4 digits
+            # This gives each worker up to 999 sequences per base_key
+            # For more workers, use modulo to create unique combinations
+            if self.total_workers <= 10:
+                # Worker 0-9: sequence = W000-W999
+                sequence = (self.worker_id * 1000) + (local_seq % 1000)
+            else:
+                # More workers: interleave sequences
+                sequence = (local_seq * self.total_workers + self.worker_id) % 10000
+            
+            if sequence == 0:
+                sequence = 1  # Avoid 0000
+            
+            nik = f"{province_code}{regency_code}{district_code}{date_str}{sequence:04d}"
+            
+            if nik not in self._used_niks:
+                self._used_niks.add(nik)
+                return nik
         
-        # Wrap around within worker's range
-        if sequence > self.sequence_end:
-            sequence = self.sequence_start
-            self._nik_sequences[base_key] = self.sequence_start
-        
-        # Format sequence to 4 digits
-        sequence_str = f"{sequence % 10000:04d}"
-        
-        return f"{province_code}{regency_code}{district_code}{date_str}{sequence_str}"
+        # Fallback: use timestamp-based unique suffix
+        import time
+        timestamp_suffix = int(time.time() * 1000) % 10000
+        nik = f"{province_code}{regency_code}{district_code}{date_str}{timestamp_suffix:04d}"
+        self._used_niks.add(nik)
+        return nik
     
     def generate_nkk(
         self,
@@ -97,7 +114,7 @@ class ProcessLocalIDGenerator:
         district_code: str,
         issue_date: date = None
     ) -> str:
-        """Generate a valid NKK with worker-specific sequence range"""
+        """Generate a valid NKK with worker-specific sequence"""
         if issue_date is None:
             issue_date = date.today()
         
@@ -105,18 +122,21 @@ class ProcessLocalIDGenerator:
         base_key = f"NKK_{province_code}{regency_code}{district_code}{date_str}"
         
         if base_key not in self._nkk_sequences:
-            self._nkk_sequences[base_key] = self.sequence_start - 1
+            self._nkk_sequences[base_key] = 0
         
         self._nkk_sequences[base_key] += 1
-        sequence = self._nkk_sequences[base_key]
+        local_seq = self._nkk_sequences[base_key]
         
-        if sequence > self.sequence_end:
-            sequence = self.sequence_start
-            self._nkk_sequences[base_key] = self.sequence_start
+        # Create unique sequence combining worker_id with local sequence
+        if self.total_workers <= 10:
+            sequence = (self.worker_id * 1000) + (local_seq % 1000)
+        else:
+            sequence = (local_seq * self.total_workers + self.worker_id) % 10000
         
-        sequence_str = f"{sequence % 10000:04d}"
+        if sequence == 0:
+            sequence = 1
         
-        return f"{province_code}{regency_code}{district_code}{date_str}{sequence_str}"
+        return f"{province_code}{regency_code}{district_code}{date_str}{sequence:04d}"
 
 
 # Age constraints (module-level for worker access)

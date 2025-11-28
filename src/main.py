@@ -241,8 +241,9 @@ def get_sql_options() -> Optional[tuple]:
     mode_options = SQLExporter.get_mode_options()
     for num, _, desc in mode_options:
         print(f"  {num}. {desc}")
+    print("  4. Semua (Structure, Data, Structure+Data)")
     
-    mode_choice = get_int_input("Pilihan [1-3]: ", 1, 3)
+    mode_choice = get_int_input("Pilihan [1-4]: ", 1, 4)
     
     return db_type, mode_choice
 
@@ -292,11 +293,26 @@ def save_outputs(
     # Save SQL
     if sql_options:
         db_type, mode = sql_options
-        sql_content = export_to_sql(data, db_type, mode)
-        sql_path = os.path.join(output_dir, f"{base_name}_{db_type}.sql")
-        with open(sql_path, 'w', encoding='utf-8') as f:
-            f.write(sql_content)
-        saved_files.append(sql_path)
+        
+        if mode == 4:  # Semua mode
+            # Generate all 3 SQL modes
+            mode_suffixes = {
+                1: 'structure',
+                2: 'data', 
+                3: 'full'
+            }
+            for m, suffix in mode_suffixes.items():
+                sql_content = export_to_sql(data, db_type, m)
+                sql_path = os.path.join(output_dir, f"{base_name}_{db_type}_{suffix}.sql")
+                with open(sql_path, 'w', encoding='utf-8') as f:
+                    f.write(sql_content)
+                saved_files.append(sql_path)
+        else:
+            sql_content = export_to_sql(data, db_type, mode)
+            sql_path = os.path.join(output_dir, f"{base_name}_{db_type}.sql")
+            with open(sql_path, 'w', encoding='utf-8') as f:
+                f.write(sql_content)
+            saved_files.append(sql_path)
     
     return saved_files
 
@@ -373,7 +389,11 @@ def main():
                 # Read CSV back for other formats if needed
                 if output_format in [2, 3, 4] or sql_options:
                     print("\n📖 Loading data untuk konversi format lain...")
-                    data = pd.read_csv(csv_path).to_dict('records')
+                    # Specify dtype for LATITUDE/LONGITUDE to avoid mixed type warning
+                    data = pd.read_csv(csv_path, dtype={
+                        'LATITUDE': 'float64',
+                        'LONGITUDE': 'float64'
+                    }, low_memory=False).to_dict('records')
                 else:
                     data = None
                     

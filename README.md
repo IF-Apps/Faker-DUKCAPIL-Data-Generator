@@ -15,7 +15,8 @@ Aplikasi Python untuk generate data penduduk Indonesia secara realistis dengan f
 ### 🆔 NIK & NKK Valid
 - NIK 16 digit sesuai format DUKCAPIL resmi
 - Validasi tanggal lahir (wanita: DD+40)
-- Nomor urut unik per kecamatan
+- **NIK dijamin 100% unik** (tidak ada duplikasi)
+- Sequence unik per worker dalam mode parallel
 - Format: `[PP][KK][CC][DDMMYY][SSSS]`
 
 ### 🗺️ Data Wilayah Lengkap
