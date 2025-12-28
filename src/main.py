@@ -8,11 +8,18 @@ import os
 import sys
 import json
 import argparse
+import logging
 from datetime import datetime
 from typing import List, Optional
 from multiprocessing import cpu_count
 
 import pandas as pd
+
+# Configure logging
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(levelname)s: %(message)s'
+)
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -458,11 +465,26 @@ def main():
         # SQL
         if sql_options:
             db_type, mode = sql_options
-            sql_content = export_to_sql(data, db_type, mode)
-            sql_path = os.path.join(output_dir, f"{base_name}_{db_type}.sql")
-            with open(sql_path, 'w', encoding='utf-8') as f:
-                f.write(sql_content)
-            saved_files.append(sql_path)
+            
+            if mode == 4:  # Semua mode
+                # Generate all 3 SQL modes
+                mode_suffixes = {
+                    1: 'structure',
+                    2: 'data', 
+                    3: 'full'
+                }
+                for m, suffix in mode_suffixes.items():
+                    sql_content = export_to_sql(data, db_type, m)
+                    sql_path = os.path.join(output_dir, f"{base_name}_{db_type}_{suffix}.sql")
+                    with open(sql_path, 'w', encoding='utf-8') as f:
+                        f.write(sql_content)
+                    saved_files.append(sql_path)
+            else:
+                sql_content = export_to_sql(data, db_type, mode)
+                sql_path = os.path.join(output_dir, f"{base_name}_{db_type}.sql")
+                with open(sql_path, 'w', encoding='utf-8') as f:
+                    f.write(sql_content)
+                saved_files.append(sql_path)
     
     # Print saved files
     print()

@@ -7,7 +7,8 @@ import os
 import csv
 import json
 import random
-from datetime import date
+import logging
+from datetime import date, timedelta
 from typing import List, Dict, Tuple, Optional, Generator
 from multiprocessing import Pool, cpu_count, Manager
 from functools import partial
@@ -15,6 +16,9 @@ import queue
 import threading
 
 from tqdm import tqdm
+
+# Setup module logger
+logger = logging.getLogger(__name__)
 
 from .wilayah_loader import WilayahLoader, get_loader
 from .reference_data import (
@@ -48,8 +52,9 @@ class ProcessLocalIDGenerator:
         self._nik_sequences: Dict[str, int] = {}
         self._nkk_sequences: Dict[str, int] = {}
         
-        # Track used NIKs within this worker to avoid duplicates
+        # Track used NIKs and NKKs within this worker to avoid duplicates
         self._used_niks: set = set()
+        self._used_nkks: set = set()
     
     def generate_nik(
         self,
@@ -70,29 +75,18 @@ class ProcessLocalIDGenerator:
         # Build base key for sequence tracking
         base_key = f"{province_code}{regency_code}{district_code}{date_str}"
         
-        # Get next sequence number
+        # Get next sequence number - start each worker at different offset
         if base_key not in self._nik_sequences:
-            self._nik_sequences[base_key] = 0
+            # Worker 0: 1-2499, Worker 1: 2500-4999, Worker 2: 5000-7499, Worker 3: 7500-9999
+            sequences_per_worker = 9999 // max(self.total_workers, 1)
+            self._nik_sequences[base_key] = self.worker_id * sequences_per_worker
         
-        # Find next available unique sequence
-        max_attempts = 10000
-        for _ in range(max_attempts):
+        # Find next available unique sequence within worker's range
+        max_seq = (self.worker_id + 1) * (9999 // max(self.total_workers, 1))
+        
+        while self._nik_sequences[base_key] < min(max_seq, 9999):
             self._nik_sequences[base_key] += 1
-            local_seq = self._nik_sequences[base_key]
-            
-            # Create unique sequence: combine worker_id with local sequence
-            # Format: worker_id (1 digit) + local_seq (3 digits) = 4 digits
-            # This gives each worker up to 999 sequences per base_key
-            # For more workers, use modulo to create unique combinations
-            if self.total_workers <= 10:
-                # Worker 0-9: sequence = W000-W999
-                sequence = (self.worker_id * 1000) + (local_seq % 1000)
-            else:
-                # More workers: interleave sequences
-                sequence = (local_seq * self.total_workers + self.worker_id) % 10000
-            
-            if sequence == 0:
-                sequence = 1  # Avoid 0000
+            sequence = self._nik_sequences[base_key]
             
             nik = f"{province_code}{regency_code}{district_code}{date_str}{sequence:04d}"
             
@@ -100,9 +94,16 @@ class ProcessLocalIDGenerator:
                 self._used_niks.add(nik)
                 return nik
         
-        # Fallback: use timestamp-based unique suffix
+        # If exhausted, try remaining sequences (may overlap with other workers, but track locally)
+        for sequence in range(1, 10000):
+            nik = f"{province_code}{regency_code}{district_code}{date_str}{sequence:04d}"
+            if nik not in self._used_niks:
+                self._used_niks.add(nik)
+                return nik
+        
+        # Final fallback: use microsecond timestamp + worker_id for uniqueness
         import time
-        timestamp_suffix = int(time.time() * 1000) % 10000
+        timestamp_suffix = (int(time.time() * 1000000) + self.worker_id) % 10000
         nik = f"{province_code}{regency_code}{district_code}{date_str}{timestamp_suffix:04d}"
         self._used_niks.add(nik)
         return nik
@@ -118,25 +119,46 @@ class ProcessLocalIDGenerator:
         if issue_date is None:
             issue_date = date.today()
         
-        date_str = f"{issue_date.day:02d}{issue_date.month:02d}{issue_date.year % 100:02d}"
-        base_key = f"NKK_{province_code}{regency_code}{district_code}{date_str}"
+        # Try multiple dates if needed to avoid collision
+        max_date_attempts = 365  # Try up to 1 year back
         
-        if base_key not in self._nkk_sequences:
-            self._nkk_sequences[base_key] = 0
+        for date_offset in range(max_date_attempts):
+            current_date = issue_date - timedelta(days=date_offset)
+            date_str = f"{current_date.day:02d}{current_date.month:02d}{current_date.year % 100:02d}"
+            base_key = f"NKK_{province_code}{regency_code}{district_code}{date_str}"
+            
+            if base_key not in self._nkk_sequences:
+                # Start each worker at different offset to avoid collision
+                # Worker 0: 1-2499, Worker 1: 2500-4999, etc.
+                sequences_per_worker = 9999 // max(self.total_workers, 1)
+                self._nkk_sequences[base_key] = self.worker_id * sequences_per_worker
+            
+            # Find next available unique NKK
+            start_seq = self._nkk_sequences[base_key]
+            max_seq = (self.worker_id + 1) * (9999 // max(self.total_workers, 1))
+            
+            while self._nkk_sequences[base_key] < max_seq:
+                self._nkk_sequences[base_key] += 1
+                sequence = self._nkk_sequences[base_key]
+                
+                if sequence > 9999:
+                    break  # Try next date
+                
+                nkk = f"{province_code}{regency_code}{district_code}{date_str}{sequence:04d}"
+                
+                if nkk not in self._used_nkks:
+                    self._used_nkks.add(nkk)
+                    return nkk
+            
+            # Exhausted this date's range for this worker, try previous date
+            continue
         
-        self._nkk_sequences[base_key] += 1
-        local_seq = self._nkk_sequences[base_key]
-        
-        # Create unique sequence combining worker_id with local sequence
-        if self.total_workers <= 10:
-            sequence = (self.worker_id * 1000) + (local_seq % 1000)
-        else:
-            sequence = (local_seq * self.total_workers + self.worker_id) % 10000
-        
-        if sequence == 0:
-            sequence = 1
-        
-        return f"{province_code}{regency_code}{district_code}{date_str}{sequence:04d}"
+        # Final fallback: use timestamp + worker_id for uniqueness
+        import time
+        timestamp_suffix = (int(time.time() * 1000000) + self.worker_id) % 10000
+        nkk = f"{province_code}{regency_code}{district_code}{date_str}{timestamp_suffix:04d}"
+        self._used_nkks.add(nkk)
+        return nkk
 
 
 # Age constraints (module-level for worker access)
@@ -243,7 +265,7 @@ def _create_person(
         'NAMA': nama,
         'JENIS_KELAMIN': gender,
         'TEMPAT_LAHIR': tempat_lahir,
-        'TANGGAL_LAHIR': birth_date.strftime('%d-%m-%Y'),
+        'TANGGAL_LAHIR': birth_date.strftime('%d|%m|%Y'),
         'AGAMA': agama,
         'PENDIDIKAN': pendidikan,
         'PEKERJAAN': pekerjaan,
@@ -419,7 +441,173 @@ def _generate_single_family(
             )
             family_members.append(child)
     
+    # Per-family assertion: ensure exactly 1 Kepala Keluarga
+    family_members = _validate_and_fix_single_family(family_members, nkk)
+    
     return family_members
+
+
+def _validate_and_fix_single_family(family_members: List[dict], nkk: str) -> List[dict]:
+    """
+    Validate and auto-fix NKK consistency rules:
+    1. Exactly 1 Kepala Keluarga per family
+    2. All members have same AGAMA
+    3. All members have same address (KODE_KELURAHAN, RT, RW, ALAMAT)
+    
+    Args:
+        family_members: List of family member records
+        nkk: NKK for logging purposes
+        
+    Returns:
+        Fixed list of family members
+    """
+    if not family_members:
+        return family_members
+    
+    # === 1. Validate Kepala Keluarga ===
+    kepala_count = sum(1 for m in family_members if m['STATUS_HUBUNGAN'] == 'Kepala Keluarga')
+    kepala = None
+    
+    if kepala_count == 0:
+        # No Kepala Keluarga - set oldest male as Kepala Keluarga
+        logger.warning(f"NKK {nkk}: No Kepala Keluarga found, auto-fixing...")
+        
+        males = [m for m in family_members if m['JENIS_KELAMIN'] == 'L']
+        candidates = males if males else family_members
+        
+        if candidates:
+            oldest = min(candidates, key=lambda m: m['TANGGAL_LAHIR'])
+            oldest['STATUS_HUBUNGAN'] = 'Kepala Keluarga'
+            kepala = oldest
+            logger.warning(f"NKK {nkk}: Set {oldest['NAMA']} as Kepala Keluarga")
+    
+    elif kepala_count > 1:
+        # Multiple Kepala Keluarga - keep first, change others to Famili Lain
+        logger.warning(f"NKK {nkk}: Found {kepala_count} Kepala Keluarga, auto-fixing...")
+        
+        first_kepala_found = False
+        for member in family_members:
+            if member['STATUS_HUBUNGAN'] == 'Kepala Keluarga':
+                if first_kepala_found:
+                    member['STATUS_HUBUNGAN'] = 'Famili Lain'
+                    logger.warning(f"NKK {nkk}: Changed {member['NAMA']} from Kepala Keluarga to Famili Lain")
+                else:
+                    first_kepala_found = True
+                    kepala = member
+    else:
+        # Exactly 1 Kepala Keluarga - find it
+        kepala = next((m for m in family_members if m['STATUS_HUBUNGAN'] == 'Kepala Keluarga'), None)
+    
+    # If still no kepala, use first member as reference
+    if kepala is None:
+        kepala = family_members[0]
+    
+    # === 2. Validate AGAMA consistency ===
+    kepala_agama = kepala['AGAMA']
+    for member in family_members:
+        if member['AGAMA'] != kepala_agama:
+            logger.warning(f"NKK {nkk}: {member['NAMA']} has different AGAMA ({member['AGAMA']}), fixing to {kepala_agama}")
+            member['AGAMA'] = kepala_agama
+    
+    # === 3. Validate address consistency ===
+    address_fields = ['KODE_KELURAHAN', 'KELURAHAN', 'KODE_KECAMATAN', 'KECAMATAN', 
+                      'KODE_KABUPATEN', 'KABUPATEN', 'KODE_PROVINSI', 'PROVINSI',
+                      'ALAMAT', 'RT', 'RW', 'LATITUDE', 'LONGITUDE']
+    
+    for member in family_members:
+        for field in address_fields:
+            if member.get(field) != kepala.get(field):
+                logger.warning(f"NKK {nkk}: {member['NAMA']} has different {field}, fixing to match Kepala Keluarga")
+                member[field] = kepala.get(field)
+    
+    return family_members
+
+
+def validate_and_fix_families(data: List[dict]) -> Tuple[List[dict], int]:
+    """
+    Post-validation: Validate all generated data and auto-fix NKK consistency:
+    1. Exactly 1 Kepala Keluarga per NKK
+    2. All members have same AGAMA per NKK
+    3. All members have same address per NKK
+    
+    Args:
+        data: List of all person records
+        
+    Returns:
+        Tuple of (fixed data, number of fixes applied)
+    """
+    from collections import defaultdict
+    
+    # Group records by NKK
+    nkk_groups = defaultdict(list)
+    for person in data:
+        nkk_groups[person['NKK']].append(person)
+    
+    total_fixes = 0
+    
+    for nkk, members in nkk_groups.items():
+        # === 1. Validate Kepala Keluarga ===
+        kepala_members = [m for m in members if m['STATUS_HUBUNGAN'] == 'Kepala Keluarga']
+        kepala_count = len(kepala_members)
+        kepala = None
+        
+        if kepala_count == 0:
+            logger.warning(f"Post-validation NKK {nkk}: No Kepala Keluarga found, auto-fixing...")
+            
+            males = [m for m in members if m['JENIS_KELAMIN'] == 'L']
+            candidates = males if males else members
+            
+            if candidates:
+                oldest = min(candidates, key=lambda m: m['TANGGAL_LAHIR'])
+                oldest['STATUS_HUBUNGAN'] = 'Kepala Keluarga'
+                kepala = oldest
+                logger.warning(f"Post-validation NKK {nkk}: Set {oldest['NAMA']} as Kepala Keluarga")
+                total_fixes += 1
+        
+        elif kepala_count > 1:
+            logger.warning(f"Post-validation NKK {nkk}: Found {kepala_count} Kepala Keluarga, auto-fixing...")
+            
+            first_kepala_found = False
+            for member in members:
+                if member['STATUS_HUBUNGAN'] == 'Kepala Keluarga':
+                    if first_kepala_found:
+                        member['STATUS_HUBUNGAN'] = 'Famili Lain'
+                        logger.warning(f"Post-validation NKK {nkk}: Changed {member['NAMA']} from Kepala Keluarga to Famili Lain")
+                        total_fixes += 1
+                    else:
+                        first_kepala_found = True
+                        kepala = member
+        else:
+            kepala = kepala_members[0]
+        
+        # If still no kepala, use first member as reference
+        if kepala is None:
+            kepala = members[0]
+        
+        # === 2. Validate AGAMA consistency ===
+        kepala_agama = kepala['AGAMA']
+        for member in members:
+            if member['AGAMA'] != kepala_agama:
+                logger.warning(f"Post-validation NKK {nkk}: {member['NAMA']} has different AGAMA ({member['AGAMA']}), fixing to {kepala_agama}")
+                member['AGAMA'] = kepala_agama
+                total_fixes += 1
+        
+        # === 3. Validate address consistency ===
+        address_fields = ['KODE_KELURAHAN', 'KELURAHAN', 'KODE_KECAMATAN', 'KECAMATAN', 
+                          'KODE_KABUPATEN', 'KABUPATEN', 'KODE_PROVINSI', 'PROVINSI',
+                          'ALAMAT', 'RT', 'RW', 'LATITUDE', 'LONGITUDE']
+        
+        for member in members:
+            for field in address_fields:
+                if member.get(field) != kepala.get(field):
+                    logger.warning(f"Post-validation NKK {nkk}: {member['NAMA']} has different {field}, fixing to match Kepala Keluarga")
+                    member[field] = kepala.get(field)
+                    total_fixes += 1
+    
+    if total_fixes > 0:
+        logger.info(f"Post-validation completed: {total_fixes} fixes applied")
+    
+    return data, total_fixes
 
 
 def _worker_generate_batch(args: Tuple) -> Tuple[List[dict], dict]:
@@ -719,6 +907,11 @@ class ParallelFamilyGenerator:
                 for result, batch_stats in pool.map(_worker_generate_batch, worker_args):
                     all_people.extend(result)
                     self._merge_stats(batch_stats)
+        
+        # Post-validation: ensure 1 NKK = 1 Kepala Keluarga
+        all_people, fixes = validate_and_fix_families(all_people)
+        if fixes > 0:
+            logger.info(f"Post-validation applied {fixes} auto-fixes to ensure 1 Kepala Keluarga per NKK")
         
         return all_people
     

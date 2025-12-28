@@ -24,8 +24,9 @@ class IDGenerator:
     """
     
     def __init__(self):
-        # Track used NIKs to avoid duplicates
+        # Track used NIKs and NKKs to avoid duplicates
         self._used_niks: set = set()
+        self._used_nkks: set = set()
         
         # Sequence counters per district+date combination
         self._nik_sequences: Dict[str, int] = {}
@@ -122,19 +123,25 @@ class IDGenerator:
             if base_key not in self._nkk_sequences:
                 self._nkk_sequences[base_key] = 0
             
-            self._nkk_sequences[base_key] += 1
-            sequence = self._nkk_sequences[base_key]
-            
-            if sequence > 9999:
-                sequence = 1
-                self._nkk_sequences[base_key] = 1
-            
-            return f"{province_code}{regency_code}{district_code}{date_str}{sequence:04d}"
+            # Find next available unique NKK (same pattern as NIK)
+            while True:
+                self._nkk_sequences[base_key] += 1
+                sequence = self._nkk_sequences[base_key]
+                
+                if sequence > 9999:
+                    raise ValueError(f"NKK sequence exhausted for {base_key}")
+                
+                nkk = f"{province_code}{regency_code}{district_code}{date_str}{sequence:04d}"
+                
+                if nkk not in self._used_nkks:
+                    self._used_nkks.add(nkk)
+                    return nkk
     
     def reset(self):
-        """Reset all sequences and used NIKs"""
+        """Reset all sequences and used NIKs/NKKs"""
         with self._lock:
             self._used_niks.clear()
+            self._used_nkks.clear()
             self._nik_sequences.clear()
             self._nkk_sequences.clear()
     
@@ -142,6 +149,7 @@ class IDGenerator:
         """Get generator statistics"""
         return {
             'total_niks_generated': len(self._used_niks),
+            'total_nkks_generated': len(self._used_nkks),
             'unique_nik_prefixes': len(self._nik_sequences),
             'unique_nkk_prefixes': len(self._nkk_sequences)
         }

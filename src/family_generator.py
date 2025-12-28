@@ -4,9 +4,14 @@ Generate Indonesian family data with consistent relationships
 """
 
 import random
+import logging
 from datetime import date, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
+from collections import defaultdict
 from tqdm import tqdm
+
+# Setup module logger
+logger = logging.getLogger(__name__)
 
 from .wilayah_loader import WilayahLoader, get_loader
 from .id_generator import IDGenerator, get_generator
@@ -190,6 +195,11 @@ class FamilyGenerator:
         if show_progress:
             pbar.close()
         
+        # Post-validation: ensure 1 NKK = 1 Kepala Keluarga
+        all_people, fixes = validate_and_fix_families(all_people)
+        if fixes > 0:
+            logger.info(f"Post-validation applied {fixes} auto-fixes to ensure 1 Kepala Keluarga per NKK")
+        
         return all_people
     
     def _generate_single_family(self, village_info: dict) -> List[dict]:
@@ -331,6 +341,84 @@ class FamilyGenerator:
                     longitude=longitude
                 )
                 family_members.append(child)
+        
+        # Per-family assertion: ensure exactly 1 Kepala Keluarga
+        family_members = self._validate_and_fix_single_family(family_members, nkk)
+        
+        return family_members
+    
+    def _validate_and_fix_single_family(self, family_members: List[dict], nkk: str) -> List[dict]:
+        """
+        Validate and auto-fix NKK consistency rules:
+        1. Exactly 1 Kepala Keluarga per family
+        2. All members have same AGAMA
+        3. All members have same address (KODE_KELURAHAN, RT, RW, ALAMAT)
+        
+        Args:
+            family_members: List of family member records
+            nkk: NKK for logging purposes
+            
+        Returns:
+            Fixed list of family members
+        """
+        if not family_members:
+            return family_members
+        
+        # === 1. Validate Kepala Keluarga ===
+        kepala_count = sum(1 for m in family_members if m['STATUS_HUBUNGAN'] == 'Kepala Keluarga')
+        kepala = None
+        
+        if kepala_count == 0:
+            # No Kepala Keluarga - set oldest male as Kepala Keluarga
+            logger.warning(f"NKK {nkk}: No Kepala Keluarga found, auto-fixing...")
+            
+            males = [m for m in family_members if m['JENIS_KELAMIN'] == 'L']
+            candidates = males if males else family_members
+            
+            if candidates:
+                oldest = min(candidates, key=lambda m: m['TANGGAL_LAHIR'])
+                oldest['STATUS_HUBUNGAN'] = 'Kepala Keluarga'
+                kepala = oldest
+                logger.warning(f"NKK {nkk}: Set {oldest['NAMA']} as Kepala Keluarga")
+        
+        elif kepala_count > 1:
+            # Multiple Kepala Keluarga - keep first, change others to Famili Lain
+            logger.warning(f"NKK {nkk}: Found {kepala_count} Kepala Keluarga, auto-fixing...")
+            
+            first_kepala_found = False
+            for member in family_members:
+                if member['STATUS_HUBUNGAN'] == 'Kepala Keluarga':
+                    if first_kepala_found:
+                        member['STATUS_HUBUNGAN'] = 'Famili Lain'
+                        logger.warning(f"NKK {nkk}: Changed {member['NAMA']} from Kepala Keluarga to Famili Lain")
+                    else:
+                        first_kepala_found = True
+                        kepala = member
+        else:
+            # Exactly 1 Kepala Keluarga - find it
+            kepala = next((m for m in family_members if m['STATUS_HUBUNGAN'] == 'Kepala Keluarga'), None)
+        
+        # If still no kepala, use first member as reference
+        if kepala is None:
+            kepala = family_members[0]
+        
+        # === 2. Validate AGAMA consistency ===
+        kepala_agama = kepala['AGAMA']
+        for member in family_members:
+            if member['AGAMA'] != kepala_agama:
+                logger.warning(f"NKK {nkk}: {member['NAMA']} has different AGAMA ({member['AGAMA']}), fixing to {kepala_agama}")
+                member['AGAMA'] = kepala_agama
+        
+        # === 3. Validate address consistency ===
+        address_fields = ['KODE_KELURAHAN', 'KELURAHAN', 'KODE_KECAMATAN', 'KECAMATAN', 
+                          'KODE_KABUPATEN', 'KABUPATEN', 'KODE_PROVINSI', 'PROVINSI',
+                          'ALAMAT', 'RT', 'RW', 'LATITUDE', 'LONGITUDE']
+        
+        for member in family_members:
+            for field in address_fields:
+                if member.get(field) != kepala.get(field):
+                    logger.warning(f"NKK {nkk}: {member['NAMA']} has different {field}, fixing to match Kepala Keluarga")
+                    member[field] = kepala.get(field)
         
         return family_members
     
@@ -534,3 +622,88 @@ def generate_recap(stats: dict, region_name: str, region_code: str) -> str:
     lines.append("=" * 50)
     
     return "\n".join(lines)
+
+
+def validate_and_fix_families(data: List[dict]) -> Tuple[List[dict], int]:
+    """
+    Post-validation: Validate all generated data and auto-fix NKK consistency:
+    1. Exactly 1 Kepala Keluarga per NKK
+    2. All members have same AGAMA per NKK
+    3. All members have same address per NKK
+    
+    Args:
+        data: List of all person records
+        
+    Returns:
+        Tuple of (fixed data, number of fixes applied)
+    """
+    # Group records by NKK
+    nkk_groups = defaultdict(list)
+    for person in data:
+        nkk_groups[person['NKK']].append(person)
+    
+    total_fixes = 0
+    
+    for nkk, members in nkk_groups.items():
+        # === 1. Validate Kepala Keluarga ===
+        kepala_members = [m for m in members if m['STATUS_HUBUNGAN'] == 'Kepala Keluarga']
+        kepala_count = len(kepala_members)
+        kepala = None
+        
+        if kepala_count == 0:
+            logger.warning(f"Post-validation NKK {nkk}: No Kepala Keluarga found, auto-fixing...")
+            
+            males = [m for m in members if m['JENIS_KELAMIN'] == 'L']
+            candidates = males if males else members
+            
+            if candidates:
+                oldest = min(candidates, key=lambda m: m['TANGGAL_LAHIR'])
+                oldest['STATUS_HUBUNGAN'] = 'Kepala Keluarga'
+                kepala = oldest
+                logger.warning(f"Post-validation NKK {nkk}: Set {oldest['NAMA']} as Kepala Keluarga")
+                total_fixes += 1
+        
+        elif kepala_count > 1:
+            logger.warning(f"Post-validation NKK {nkk}: Found {kepala_count} Kepala Keluarga, auto-fixing...")
+            
+            first_kepala_found = False
+            for member in members:
+                if member['STATUS_HUBUNGAN'] == 'Kepala Keluarga':
+                    if first_kepala_found:
+                        member['STATUS_HUBUNGAN'] = 'Famili Lain'
+                        logger.warning(f"Post-validation NKK {nkk}: Changed {member['NAMA']} from Kepala Keluarga to Famili Lain")
+                        total_fixes += 1
+                    else:
+                        first_kepala_found = True
+                        kepala = member
+        else:
+            kepala = kepala_members[0]
+        
+        # If still no kepala, use first member as reference
+        if kepala is None:
+            kepala = members[0]
+        
+        # === 2. Validate AGAMA consistency ===
+        kepala_agama = kepala['AGAMA']
+        for member in members:
+            if member['AGAMA'] != kepala_agama:
+                logger.warning(f"Post-validation NKK {nkk}: {member['NAMA']} has different AGAMA ({member['AGAMA']}), fixing to {kepala_agama}")
+                member['AGAMA'] = kepala_agama
+                total_fixes += 1
+        
+        # === 3. Validate address consistency ===
+        address_fields = ['KODE_KELURAHAN', 'KELURAHAN', 'KODE_KECAMATAN', 'KECAMATAN', 
+                          'KODE_KABUPATEN', 'KABUPATEN', 'KODE_PROVINSI', 'PROVINSI',
+                          'ALAMAT', 'RT', 'RW', 'LATITUDE', 'LONGITUDE']
+        
+        for member in members:
+            for field in address_fields:
+                if member.get(field) != kepala.get(field):
+                    logger.warning(f"Post-validation NKK {nkk}: {member['NAMA']} has different {field}, fixing to match Kepala Keluarga")
+                    member[field] = kepala.get(field)
+                    total_fixes += 1
+    
+    if total_fixes > 0:
+        logger.info(f"Post-validation completed: {total_fixes} fixes applied")
+    
+    return data, total_fixes
