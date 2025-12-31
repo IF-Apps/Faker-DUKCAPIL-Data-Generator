@@ -389,7 +389,7 @@ def main():
     # For mode 4, we don't need num_families input - calculate from simulation data
     if distribution_mode == 4 and simulation_data:
         # Get villages for this region to calculate preview
-        villages = loader.get_villages_for_region(region_code)
+        villages = loader.get_sub_regions(region_code)
         village_codes = {v['village_code'] for v in villages}
         
         # Calculate matched villages and totals
