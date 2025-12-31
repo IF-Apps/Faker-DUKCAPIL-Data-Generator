@@ -79,15 +79,19 @@ class FamilyGenerator:
         self,
         villages: List[dict],
         num_families: int,
-        mode: int
+        mode: int,
+        simulation_data: Dict[str, int] = None,
+        correction_percent: int = 0
     ) -> Dict[str, int]:
         """
         Distribute families across villages
         
         Args:
             villages: List of village info dicts
-            num_families: Total number of families to generate
-            mode: Distribution mode (1=even, 2=even with random count, 3=random)
+            num_families: Total number of families to generate (ignored for mode 4)
+            mode: Distribution mode (1=even, 2=even with random count, 3=random, 4=simulation)
+            simulation_data: Dict mapping village_code to NKK count (for mode 4)
+            correction_percent: Percentage correction for simulation mode (-100 to 1000)
             
         Returns:
             Dict mapping village_code to family count
@@ -124,6 +128,18 @@ class FamilyGenerator:
                 for village in selected:
                     distribution[village['village_code']] = distribution.get(village['village_code'], 0) + 1
         
+        elif mode == 4 and simulation_data:
+            # Mode 4: Simulation-based distribution
+            # Only include villages that exist in simulation data
+            for village in villages:
+                village_code = village['village_code']
+                if village_code in simulation_data:
+                    base_count = simulation_data[village_code]
+                    # Apply correction: count = base * (1 + correction/100)
+                    corrected_count = int(base_count * (1 + correction_percent / 100))
+                    if corrected_count > 0:
+                        distribution[village_code] = corrected_count
+        
         else:
             # Mode 3: Random distribution (some villages may get 0)
             for _ in range(num_families):
@@ -138,7 +154,9 @@ class FamilyGenerator:
         region_code: str,
         num_families: int,
         distribution_mode: int = 1,
-        show_progress: bool = True
+        show_progress: bool = True,
+        simulation_data: Dict[str, int] = None,
+        correction_percent: int = 0
     ) -> List[dict]:
         """
         Generate multiple families for a region
@@ -146,8 +164,10 @@ class FamilyGenerator:
         Args:
             region_code: Regional code (province/regency/district)
             num_families: Number of families to generate
-            distribution_mode: 1=even, 2=even random, 3=random
+            distribution_mode: 1=even, 2=even random, 3=random, 4=simulation
             show_progress: Show progress bar
+            simulation_data: Dict mapping village_code to NKK count (for mode 4)
+            correction_percent: Percentage correction for simulation mode
             
         Returns:
             List of person records (all family members)
@@ -160,7 +180,13 @@ class FamilyGenerator:
             raise ValueError(f"Tidak ada kelurahan ditemukan untuk kode {region_code}")
         
         # Distribute families across villages
-        distribution = self.distribute_families(villages, num_families, distribution_mode)
+        distribution = self.distribute_families(
+            villages, num_families, distribution_mode,
+            simulation_data=simulation_data, correction_percent=correction_percent
+        )
+        
+        # Recalculate actual num_families for mode 4
+        actual_num_families = sum(distribution.values())
         
         # Build village lookup
         village_lookup = {v['village_code']: v for v in villages}
@@ -172,7 +198,7 @@ class FamilyGenerator:
         family_items = list(distribution.items())
         
         if show_progress:
-            pbar = tqdm(total=num_families, desc="Generating families", unit="KK")
+            pbar = tqdm(total=actual_num_families, desc="Generating families", unit="KK")
         
         for village_code, family_count in family_items:
             village_info = village_lookup[village_code]

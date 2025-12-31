@@ -439,3 +439,38 @@ def get_loader(data_dir: str = None) -> WilayahLoader:
     if _loader_instance is None:
         _loader_instance = WilayahLoader(data_dir)
     return _loader_instance
+
+
+def load_nkk_simulasi(data_dir: str = None) -> Dict[str, int]:
+    """
+    Load NKK simulation data from CSV file.
+    
+    Format CSV: kode,nkk (with header)
+    
+    Args:
+        data_dir: Path to data directory containing Kelurahan-nkk-simulasi.csv
+        
+    Returns:
+        Dict mapping village_code to NKK count
+    """
+    if data_dir is None:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join(os.path.dirname(current_dir), 'data')
+    
+    filepath = os.path.join(data_dir, 'Kelurahan-nkk-simulasi.csv')
+    
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"File simulasi tidak ditemukan: {filepath}")
+    
+    simulation_data = {}
+    with open(filepath, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)  # Use DictReader to handle header
+        for row in reader:
+            village_code = row['kode'].strip()
+            try:
+                nkk_count = int(row['nkk'].strip())
+                simulation_data[village_code] = nkk_count
+            except (ValueError, KeyError):
+                continue  # Skip invalid rows
+    
+    return simulation_data

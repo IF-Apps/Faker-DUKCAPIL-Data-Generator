@@ -788,9 +788,23 @@ class ParallelFamilyGenerator:
         self,
         villages: List[dict],
         num_families: int,
-        mode: int
+        mode: int,
+        simulation_data: Dict[str, int] = None,
+        correction_percent: int = 0
     ) -> Dict[str, int]:
-        """Distribute families across villages (same logic as FamilyGenerator)"""
+        """
+        Distribute families across villages (same logic as FamilyGenerator)
+        
+        Args:
+            villages: List of village info dicts
+            num_families: Total number of families to generate (ignored for mode 4)
+            mode: Distribution mode (1=even, 2=even with random count, 3=random, 4=simulation)
+            simulation_data: Dict mapping village_code to NKK count (for mode 4)
+            correction_percent: Percentage correction for simulation mode (-100 to 1000)
+            
+        Returns:
+            Dict mapping village_code to family count
+        """
         distribution = {}
         
         if mode == 1:
@@ -814,6 +828,18 @@ class ParallelFamilyGenerator:
                 selected = random.sample(villages, num_families)
                 for village in selected:
                     distribution[village['village_code']] = distribution.get(village['village_code'], 0) + 1
+        
+        elif mode == 4 and simulation_data:
+            # Mode 4: Simulation-based distribution
+            # Only include villages that exist in simulation data
+            for village in villages:
+                village_code = village['village_code']
+                if village_code in simulation_data:
+                    base_count = simulation_data[village_code]
+                    # Apply correction: count = base * (1 + correction/100)
+                    corrected_count = int(base_count * (1 + correction_percent / 100))
+                    if corrected_count > 0:
+                        distribution[village_code] = corrected_count
         
         else:
             for _ in range(num_families):
@@ -844,7 +870,9 @@ class ParallelFamilyGenerator:
         region_code: str,
         num_families: int,
         distribution_mode: int = 1,
-        show_progress: bool = True
+        show_progress: bool = True,
+        simulation_data: Dict[str, int] = None,
+        correction_percent: int = 0
     ) -> List[dict]:
         """
         Generate families using parallel processing (in-memory mode).
@@ -853,8 +881,10 @@ class ParallelFamilyGenerator:
         Args:
             region_code: Regional code
             num_families: Number of families
-            distribution_mode: 1=even, 2=even random, 3=random
+            distribution_mode: 1=even, 2=even random, 3=random, 4=simulation
             show_progress: Show progress bar
+            simulation_data: Dict mapping village_code to NKK count (for mode 4)
+            correction_percent: Percentage correction for simulation mode
             
         Returns:
             List of all person records
@@ -867,7 +897,13 @@ class ParallelFamilyGenerator:
             raise ValueError(f"Tidak ada kelurahan untuk kode {region_code}")
         
         # Prepare distribution
-        distribution = self.distribute_families(villages, num_families, distribution_mode)
+        distribution = self.distribute_families(
+            villages, num_families, distribution_mode,
+            simulation_data=simulation_data, correction_percent=correction_percent
+        )
+        
+        # Recalculate actual num_families for mode 4
+        actual_num_families = sum(distribution.values())
         
         # Build lookups for workers (picklable data only)
         village_lookup = {v['village_code']: v for v in villages}
@@ -898,7 +934,7 @@ class ParallelFamilyGenerator:
         with Pool(actual_workers) as pool:
             if show_progress:
                 results = []
-                with tqdm(total=num_families, desc="Generating", unit="KK") as pbar:
+                with tqdm(total=actual_num_families, desc="Generating", unit="KK") as pbar:
                     for result, batch_stats in pool.imap_unordered(_worker_generate_batch, worker_args):
                         all_people.extend(result)
                         self._merge_stats(batch_stats)
@@ -921,7 +957,9 @@ class ParallelFamilyGenerator:
         num_families: int,
         output_path: str,
         distribution_mode: int = 1,
-        show_progress: bool = True
+        show_progress: bool = True,
+        simulation_data: Dict[str, int] = None,
+        correction_percent: int = 0
     ) -> str:
         """
         Generate families with streaming write to CSV.
@@ -931,8 +969,10 @@ class ParallelFamilyGenerator:
             region_code: Regional code
             num_families: Number of families
             output_path: Path for output CSV file
-            distribution_mode: 1=even, 2=even random, 3=random
+            distribution_mode: 1=even, 2=even random, 3=random, 4=simulation
             show_progress: Show progress bar
+            simulation_data: Dict mapping village_code to NKK count (for mode 4)
+            correction_percent: Percentage correction for simulation mode
             
         Returns:
             Path to output CSV file
@@ -948,7 +988,13 @@ class ParallelFamilyGenerator:
             raise ValueError(f"Tidak ada kelurahan untuk kode {region_code}")
         
         # Prepare distribution
-        distribution = self.distribute_families(villages, num_families, distribution_mode)
+        distribution = self.distribute_families(
+            villages, num_families, distribution_mode,
+            simulation_data=simulation_data, correction_percent=correction_percent
+        )
+        
+        # Recalculate actual num_families for mode 4
+        actual_num_families = sum(distribution.values())
         
         # Build lookups
         village_lookup = {v['village_code']: v for v in villages}
@@ -981,7 +1027,7 @@ class ParallelFamilyGenerator:
             # Process in parallel
             with Pool(actual_workers) as pool:
                 if show_progress:
-                    with tqdm(total=num_families, desc="Generating", unit="KK") as pbar:
+                    with tqdm(total=actual_num_families, desc="Generating", unit="KK") as pbar:
                         for families_done, batch_stats in pool.imap_unordered(
                             _worker_generate_batch_streaming, worker_args
                         ):

@@ -24,7 +24,7 @@ logging.basicConfig(
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.wilayah_loader import WilayahLoader, get_loader
+from src.wilayah_loader import WilayahLoader, get_loader, load_nkk_simulasi
 from src.family_generator import FamilyGenerator, generate_recap
 from src.parallel_generator import ParallelFamilyGenerator, get_optimal_workers
 from src.sql_exporter import SQLExporter, export_to_sql
@@ -165,15 +165,47 @@ def get_region_code(loader: WilayahLoader) -> tuple:
         print()
 
 
-def get_distribution_mode() -> int:
-    """Get distribution mode from user"""
+def get_distribution_mode() -> tuple:
+    """
+    Get distribution mode from user
+    
+    Returns:
+        Tuple of (mode, correction_percent, simulation_data)
+        - mode: 1-4
+        - correction_percent: Only for mode 4, otherwise 0
+        - simulation_data: Only for mode 4, otherwise None
+    """
     print("Pilih distribusi keluarga:")
     print("  1. Merata (setiap kelurahan dapat jumlah KK sama)")
     print("  2. Merata dengan jumlah KK acak per kelurahan")
     print("  3. Random (kelurahan dipilih secara acak)")
+    print("  4. Simulasi (berdasarkan file data/Kelurahan-nkk-simulasi.csv)")
     
-    choice = get_input("Pilihan [1-3]: ", ['1', '2', '3'])
-    return int(choice)
+    choice = get_input("Pilihan [1-4]: ", ['1', '2', '3', '4'])
+    mode = int(choice)
+    
+    if mode == 4:
+        # Load simulation data
+        try:
+            simulation_data = load_nkk_simulasi()
+            print(f"\n✓ Data simulasi loaded: {len(simulation_data)} kelurahan")
+        except FileNotFoundError as e:
+            print(f"\n❌ {e}")
+            print("Kembali ke mode distribusi merata.")
+            return 1, 0, None
+        
+        # Ask for correction percentage
+        print("\nMasukkan persentase koreksi jumlah KK:")
+        print("  -100 = 0% (tidak ada KK)")
+        print("     0 = 100% (sesuai data simulasi)")
+        print("   100 = 200% (dua kali lipat)")
+        print("  1000 = 1100% (sebelas kali lipat)")
+        
+        correction = get_int_input("Koreksi [-100 s/d 1000]: ", min_val=-100, max_val=1000)
+        
+        return mode, correction, simulation_data
+    
+    return mode, 0, None
 
 
 def get_processing_mode() -> tuple:
@@ -351,12 +383,68 @@ def main():
     # Get region code
     region_code, region_info = get_region_code(loader)
     
-    # Get number of families (no upper limit)
-    num_families = get_int_input("Masukkan jumlah keluarga: ", min_val=1)
-    print()
+    # Get distribution mode (returns tuple for mode 4)
+    distribution_mode, correction_percent, simulation_data = get_distribution_mode()
     
-    # Get distribution mode
-    distribution_mode = get_distribution_mode()
+    # For mode 4, we don't need num_families input - calculate from simulation data
+    if distribution_mode == 4 and simulation_data:
+        # Get villages for this region to calculate preview
+        villages = loader.get_villages_for_region(region_code)
+        village_codes = {v['village_code'] for v in villages}
+        
+        # Calculate matched villages and totals
+        matched_villages = []
+        total_base = 0
+        total_corrected = 0
+        
+        for village in villages:
+            vc = village['village_code']
+            if vc in simulation_data:
+                base_count = simulation_data[vc]
+                corrected_count = int(base_count * (1 + correction_percent / 100))
+                if corrected_count > 0:
+                    matched_villages.append({
+                        'code': vc,
+                        'name': village.get('village_name', vc),
+                        'base': base_count,
+                        'corrected': corrected_count
+                    })
+                    total_base += base_count
+                    total_corrected += corrected_count
+        
+        # Show preview
+        print()
+        print("=" * 55)
+        print("           PREVIEW SIMULASI")
+        print("=" * 55)
+        print(f"  Kelurahan di wilayah       : {len(villages)}")
+        print(f"  Kelurahan dalam simulasi   : {len(matched_villages)}")
+        print(f"  Kelurahan tidak termasuk   : {len(villages) - len(matched_villages)}")
+        print()
+        print(f"  Total KK (data simulasi)   : {total_base:,}")
+        print(f"  Koreksi                    : {correction_percent:+d}%")
+        print(f"  Total KK (setelah koreksi) : {total_corrected:,}")
+        print("=" * 55)
+        
+        if len(matched_villages) == 0:
+            print("\n❌ Tidak ada kelurahan yang cocok dengan data simulasi!")
+            print("   Pastikan file data/Kelurahan-nkk-simulasi.csv berisi")
+            print(f"   kode kelurahan untuk wilayah {region_code}")
+            sys.exit(1)
+        
+        # Ask for confirmation
+        print()
+        confirm = input("Lanjutkan generate? [Y/n]: ").strip().lower()
+        if confirm in ['n', 'no', 'tidak']:
+            print("\n👋 Dibatalkan.")
+            sys.exit(0)
+        
+        num_families = total_corrected  # Use corrected total
+        print()
+    else:
+        # Get number of families (no upper limit) for non-simulation modes
+        num_families = get_int_input("Masukkan jumlah keluarga: ", min_val=1)
+        print()
     
     # Get processing mode
     proc_mode, num_workers, use_streaming = get_processing_mode()
@@ -390,7 +478,9 @@ def main():
                     num_families=num_families,
                     output_path=csv_path,
                     distribution_mode=distribution_mode,
-                    show_progress=True
+                    show_progress=True,
+                    simulation_data=simulation_data,
+                    correction_percent=correction_percent
                 )
                 
                 # Read CSV back for other formats if needed
@@ -412,7 +502,9 @@ def main():
                     region_code=region_code,
                     num_families=num_families,
                     distribution_mode=distribution_mode,
-                    show_progress=True
+                    show_progress=True,
+                    simulation_data=simulation_data,
+                    correction_percent=correction_percent
                 )
                 streaming_csv_saved = False
         else:
@@ -422,7 +514,9 @@ def main():
                 region_code=region_code,
                 num_families=num_families,
                 distribution_mode=distribution_mode,
-                show_progress=True
+                show_progress=True,
+                simulation_data=simulation_data,
+                correction_percent=correction_percent
             )
             streaming_csv_saved = False
     except Exception as e:
