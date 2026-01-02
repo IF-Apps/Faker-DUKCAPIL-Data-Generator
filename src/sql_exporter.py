@@ -67,6 +67,18 @@ class SQLExporter:
             db_type: Database type (oracle, postgresql, mariadb, mysql, sqlserver, sqlite)
         """
         self.db_type = db_type.lower()
+    
+    def _get_table_name(self) -> str:
+        """Get table name with proper casing for database type"""
+        if self.db_type == self.ORACLE:
+            return self.TABLE_NAME.upper()
+        return self.TABLE_NAME.lower()
+    
+    def _get_column_name(self, name: str) -> str:
+        """Get column name with proper casing for database type"""
+        if self.db_type == self.ORACLE:
+            return name.upper()
+        return name.lower()
         
     def export(self, data: List[dict], mode: int) -> str:
         """
@@ -118,22 +130,24 @@ class SQLExporter:
     
     def _get_drop_table(self) -> str:
         """Generate DROP TABLE statement"""
+        table_name = self._get_table_name()
         if self.db_type == self.SQLSERVER:
-            return f"""IF OBJECT_ID('{self.TABLE_NAME}', 'U') IS NOT NULL
-    DROP TABLE {self.TABLE_NAME};"""
+            return f"""IF OBJECT_ID('{table_name}', 'U') IS NOT NULL
+    DROP TABLE {table_name};"""
         elif self.db_type == self.ORACLE:
             return f"""BEGIN
-    EXECUTE IMMEDIATE 'DROP TABLE {self.TABLE_NAME}';
+    EXECUTE IMMEDIATE 'DROP TABLE {table_name}';
 EXCEPTION
     WHEN OTHERS THEN
         IF SQLCODE != -942 THEN RAISE; END IF;
 END;
 /"""
         else:
-            return f"DROP TABLE IF EXISTS {self.TABLE_NAME};"
+            return f"DROP TABLE IF EXISTS {table_name};"
     
     def _get_create_table(self) -> str:
         """Generate CREATE TABLE statement based on database type"""
+        table_name = self._get_table_name()
         columns = []
         
         for col_name, col_type, col_size in self.COLUMNS:
@@ -149,57 +163,62 @@ END;
         
         # Build CREATE TABLE statement
         if self.db_type == self.MYSQL or self.db_type == self.MARIADB:
-            return f"""CREATE TABLE {self.TABLE_NAME} (
+            return f"""CREATE TABLE {table_name} (
 {columns_str}
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"""
         elif self.db_type == self.SQLSERVER:
-            return f"""CREATE TABLE [{self.TABLE_NAME}] (
+            return f"""CREATE TABLE [{table_name}] (
 {columns_str}
 );"""
         else:
-            return f"""CREATE TABLE {self.TABLE_NAME} (
+            return f"""CREATE TABLE {table_name} (
 {columns_str}
 );"""
     
     def _get_column_definition(self, name: str, col_type: str, size) -> str:
         """Get column definition for specific database"""
+        col_name = self._get_column_name(name)
+        
         if self.db_type == self.ORACLE:
             if col_type == 'VARCHAR':
-                return f"{name} VARCHAR2({size})"
+                return f"{col_name} VARCHAR2({size})"
             elif col_type == 'DECIMAL':
                 precision, scale = size
-                return f"{name} NUMBER({precision},{scale})"
-            return f"{name} {col_type}"
+                return f"{col_name} NUMBER({precision},{scale})"
+            return f"{col_name} {col_type}"
         
         elif self.db_type == self.SQLSERVER:
             if col_type == 'VARCHAR':
-                return f"[{name}] NVARCHAR({size})"
+                return f"[{col_name}] NVARCHAR({size})"
             elif col_type == 'DECIMAL':
                 precision, scale = size
-                return f"[{name}] DECIMAL({precision},{scale})"
-            return f"[{name}] {col_type}"
+                return f"[{col_name}] DECIMAL({precision},{scale})"
+            return f"[{col_name}] {col_type}"
         
         elif self.db_type == self.SQLITE:
             if col_type == 'DECIMAL':
-                return f"{name} REAL"
-            return f"{name} TEXT"
+                return f"{col_name} REAL"
+            return f"{col_name} TEXT"
         
         else:  # PostgreSQL, MySQL, MariaDB
             if col_type == 'VARCHAR':
-                return f"{name} VARCHAR({size})"
+                return f"{col_name} VARCHAR({size})"
             elif col_type == 'DECIMAL':
                 precision, scale = size
-                return f"{name} DECIMAL({precision},{scale})"
-            return f"{name} {col_type}"
+                return f"{col_name} DECIMAL({precision},{scale})"
+            return f"{col_name} {col_type}"
     
     def _get_primary_key(self) -> str:
         """Get primary key constraint"""
+        table_name = self._get_table_name()
+        pk_col = self._get_column_name('NIK')
+        
         if self.db_type == self.SQLSERVER:
-            return "CONSTRAINT PK_penduduk PRIMARY KEY ([NIK])"
+            return f"CONSTRAINT pk_{table_name} PRIMARY KEY ([{pk_col}])"
         elif self.db_type == self.ORACLE:
-            return "CONSTRAINT PK_penduduk PRIMARY KEY (NIK)"
+            return f"CONSTRAINT PK_{table_name.upper()} PRIMARY KEY ({pk_col})"
         else:
-            return "PRIMARY KEY (NIK)"
+            return f"PRIMARY KEY ({pk_col})"
     
     def _get_insert_statements(self, data: List[dict]) -> str:
         """Generate INSERT statements"""
@@ -207,20 +226,22 @@ END;
             return "-- No data to insert"
         
         lines = []
+        table_name = self._get_table_name()
         
-        # Get column names
+        # Get column names with proper casing
         col_names = [col[0] for col in self.COLUMNS]
+        col_names_formatted = [self._get_column_name(c) for c in col_names]
         
         if self.db_type == self.SQLSERVER:
-            col_names_str = ", ".join([f"[{c}]" for c in col_names])
+            col_names_str = ", ".join([f"[{c}]" for c in col_names_formatted])
         else:
-            col_names_str = ", ".join(col_names)
+            col_names_str = ", ".join(col_names_formatted)
         
         # Generate INSERT statements
         # Use batch insert for efficiency where supported
         if self.db_type in [self.MYSQL, self.MARIADB]:
             # MySQL/MariaDB supports multi-value INSERT
-            lines.append(f"INSERT INTO {self.TABLE_NAME} ({col_names_str}) VALUES")
+            lines.append(f"INSERT INTO {table_name} ({col_names_str}) VALUES")
             
             values_list = []
             for i, record in enumerate(data):
@@ -233,11 +254,11 @@ END;
                     values_list = []
                     if i < len(data) - 1:
                         lines.append("")
-                        lines.append(f"INSERT INTO {self.TABLE_NAME} ({col_names_str}) VALUES")
+                        lines.append(f"INSERT INTO {table_name} ({col_names_str}) VALUES")
         
         elif self.db_type == self.POSTGRESQL:
             # PostgreSQL also supports multi-value INSERT
-            lines.append(f"INSERT INTO {self.TABLE_NAME} ({col_names_str}) VALUES")
+            lines.append(f"INSERT INTO {table_name} ({col_names_str}) VALUES")
             
             values_list = []
             for i, record in enumerate(data):
@@ -249,16 +270,16 @@ END;
                     values_list = []
                     if i < len(data) - 1:
                         lines.append("")
-                        lines.append(f"INSERT INTO {self.TABLE_NAME} ({col_names_str}) VALUES")
+                        lines.append(f"INSERT INTO {table_name} ({col_names_str}) VALUES")
         
         else:
             # Oracle, SQL Server, SQLite - individual INSERT statements
             for record in data:
                 values = self._format_values(record, col_names)
                 if self.db_type == self.SQLSERVER:
-                    lines.append(f"INSERT INTO [{self.TABLE_NAME}] ({col_names_str}) VALUES ({values});")
+                    lines.append(f"INSERT INTO [{table_name}] ({col_names_str}) VALUES ({values});")
                 else:
-                    lines.append(f"INSERT INTO {self.TABLE_NAME} ({col_names_str}) VALUES ({values});")
+                    lines.append(f"INSERT INTO {table_name} ({col_names_str}) VALUES ({values});")
         
         # Add COMMIT for databases that need it
         if self.db_type == self.ORACLE:

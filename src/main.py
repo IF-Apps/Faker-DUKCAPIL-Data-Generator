@@ -246,7 +246,7 @@ def get_processing_mode() -> tuple:
     return 'sequential', 1, False
 
 
-def get_output_format() -> int:
+def get_output_format() -> tuple:
     """Get output format from user"""
     print("\nPilih format output:")
     print("  1. CSV")
@@ -255,7 +255,17 @@ def get_output_format() -> int:
     print("  4. Semua format (CSV, Excel, JSON)")
     
     choice = get_input("Pilihan [1-4]: ", ['1', '2', '3', '4'])
-    return int(choice)
+    format_choice = int(choice)
+    
+    # Ask for column name case
+    print("\nPilih format nama kolom:")
+    print("  1. UPPERCASE (NKK, NIK, NAMA, ...)")
+    print("  2. lowercase (nkk, nik, nama, ...)")
+    
+    case_choice = get_input("Pilihan [1-2]: ", ['1', '2'])
+    use_lowercase = (case_choice == '2')
+    
+    return format_choice, use_lowercase
 
 
 def get_sql_options() -> Optional[tuple]:
@@ -450,7 +460,7 @@ def main():
     proc_mode, num_workers, use_streaming = get_processing_mode()
     
     # Get output format
-    output_format = get_output_format()
+    output_format, use_lowercase = get_output_format()
     
     # Get SQL options
     sql_options = get_sql_options()
@@ -528,13 +538,27 @@ def main():
     # Save outputs
     saved_files = []
     
+    # Helper function to convert keys to lowercase
+    def convert_keys_lowercase(records):
+        return [{k.lower(): v for k, v in record.items()} for record in records]
+    
     # Handle streaming CSV case
     if proc_mode == 'parallel' and use_streaming and streaming_csv_saved:
         if output_format in [1, 4]:
+            # If lowercase needed, read and rewrite the CSV
+            if use_lowercase:
+                import pandas as pd
+                df_temp = pd.read_csv(csv_path)
+                df_temp.columns = [c.lower() for c in df_temp.columns]
+                df_temp.to_csv(csv_path, index=False, encoding='utf-8-sig')
             saved_files.append(csv_path)
     
     # Save other formats if we have data in memory
     if data is not None:
+        # Convert to lowercase if needed
+        if use_lowercase:
+            data = convert_keys_lowercase(data)
+        
         # CSV (if not already saved via streaming)
         if output_format in [1, 4] and not streaming_csv_saved:
             df = pd.DataFrame(data)
